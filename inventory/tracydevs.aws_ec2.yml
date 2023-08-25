@@ -1,0 +1,10 @@
+---
+# Docs: https://docs.ansible.com/ansible/latest/collections/amazon/aws/aws_ec2_inventory.html
+# Secret_Key provided via the ENV variable `AWS_SECRET_ACCESS_KEY`
+# ansible_accessKeys.csv
+
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-west-2
+access_key: AKIA55VPA3ZL4P74NAVC # The ID of the access key on the account
+# aws_secret_access_key: ????????? # The secret value of the access key, can also be in ENV

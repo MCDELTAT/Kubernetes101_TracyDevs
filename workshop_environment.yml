@@ -1,0 +1,231 @@
+---
+- name: Configure the environment for the workshop
+  hosts: aws_ec2
+  become: yes
+  vars:
+    docker_temp_gpg: /tmp/docker-gpg
+    docker_gpg: /etc/apt/keyrings/docker.gpg
+    helm_temp_gpg: /tmp/helm-gpg
+    helm_gpg: /etc/apt/keyrings/helm.gpg
+  tasks:
+    ## BEGIN: General Updates to the system
+    - name: Update the base packages
+      apt:
+        update_cache: true
+        upgrade: safe
+
+    # mkpasswd --method=sha-512
+    - name: Change the password for the user ubuntu
+      user:
+        name: ubuntu
+        password: "$6$Oe0ivZ5YAUB7LXJ5$bjGhgjW5q5cMaqRuauQGwudnvt/UWFpbJNhWGy5KZ7ZUgWuw.J1.SLEvLnfzm2h4IJ88pc/jzkX0VoCXHAyBo0"
+
+    - name: Allow password authentication to the system
+      lineinfile:
+        line: "PasswordAuthentication yes"
+        path: "/etc/ssh/sshd_config"
+        search_string: "PasswordAuthentication no"
+        state: present
+      register: sshd_config_change
+
+    - name: Reload sshd config to reflect changes
+      service:
+        name: sshd
+        state: reloaded
+      when: sshd_config_change.changed
+
+    - name: Copy over the application code we'll be writing
+      copy:
+        src: ./applications
+        dest: /home/ubuntu
+
+    - name: Copy over the Kubernetes resources we'll be writing
+      copy:
+        src: ./resources
+        dest: /home/ubuntu
+
+    ## BEGIN: Install Docker
+    - name: Install docker dependencies
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - apt-transport-https
+        state: present
+    
+    - name: Create the keyring directory and set permissions
+      file:
+        path: /etc/apt/keyrings
+        mode: 0755
+        state: directory
+
+    - name: Get gpg key state
+      stat:
+        path: "{{ docker_gpg }}"
+      register: gpg_key_state
+
+    - name: Download the docker gpg key
+      get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: "{{ docker_temp_gpg }}"
+      when: not gpg_key_state.stat.exists
+
+    - name: Decrypt the key and install it
+      shell: "cat {{ docker_temp_gpg }} | gpg --dearmor -o {{ docker_gpg }}"
+      when: not gpg_key_state.stat.exists
+
+    - name: Delete tmp file after successful copy
+      file:
+        path: "{{ docker_temp_gpg }}"
+        state: absent
+      when: gpg_key_state.stat.exists
+
+    - name: Set correct permissions on the docker keyring
+      file:
+        path: "{{ docker_gpg }}"
+        mode: a+r
+
+    - name: Configure the docker repository in the apt sources
+      lineinfile:
+        path: /etc/apt/sources.list.d/docker.list
+        line: "deb [arch=amd64 signed-by={{ docker_gpg }}] https://download.docker.com/linux/ubuntu   jammy stable"
+        state: present
+        create: true
+        mode: 0644
+
+    - name: Update the apt cache and install Docker 
+      apt:
+        update_cache: true
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+          - bash-completion
+        state: present
+
+    - name: Add ubuntu user to docker group
+      user:
+        append: true
+        groups: docker
+        name: ubuntu
+
+    - name: Reset ssh connection to allow user changes to affect 'current login user'
+      ansible.builtin.meta: reset_connection
+
+    ## BEGIN: Install and Configure minikube
+    - name: Get minikube binary state
+      stat:
+        path: /usr/local/bin/minikube
+      register: minikube_binary_state
+
+    - name: Download the latest binary
+      get_url:
+        url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+        dest: /tmp/minikube-linux-amd64
+        checksum: sha256:https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64.sha256
+        mode: 0644
+      when: not minikube_binary_state.stat.exists
+
+    - name: Move the binary to the correct location
+      copy:
+        src: /tmp/minikube-linux-amd64
+        dest: /usr/local/bin/minikube
+        remote_src: true
+        owner: ubuntu
+        mode: 0744
+      when: not minikube_binary_state.stat.exists
+
+    - name: Remove the original downloaded binary
+      file:
+        path: /tmp/minikube-linux-amd64
+        state: absent
+      when: minikube_binary_state.stat.exists
+
+    - name: Get the latest stable version of K8S
+      command: "curl -L -s https://dl.k8s.io/release/stable.txt"
+      register: k8s_latest_stable
+
+    - name: Get minikube profiles
+      command: "minikube profile list"
+      become: false
+      ignore_errors: true
+      register: minikube_profiles
+
+    # If Minikube is running when a start command is issued, it can take a long time to restart
+    # So only run this if it's stopped
+    - name: Start minikube
+      command: "minikube start --kubernetes-version={{ k8s_latest_stable.stdout }}"
+      become: false
+      when: '"No minikube profile was found." in minikube_profiles.stderr'
+
+    ## BEGIN: Install kubectl and autocomplete
+    - name: Download the latest kubectl version
+      get_url:
+        url: "https://dl.k8s.io/release/{{ k8s_latest_stable.stdout }}/bin/linux/amd64/kubectl"
+        dest: /tmp/kubectl
+        checksum: sha256:https://dl.k8s.io/{{ k8s_latest_stable.stdout }}/bin/linux/amd64/kubectl.sha256
+        mode: 0644
+
+    - name: Move the binary to the correct location
+      copy:
+        src: /tmp/kubectl
+        dest: /usr/local/bin/kubectl
+        remote_src: true
+        owner: root
+        group: root
+        mode: 0755
+    
+    - name: Add kubectl bash completion to the .bashrc file
+      lineinfile:
+        line: "source <(kubectl completion bash)"
+        path: /home/ubuntu/.bashrc
+
+    ## BEGIN: Install Helm via apt
+    - name: Get gpg key state
+      stat:
+        path: /etc/apt/keyrings/helm.gpg
+      register: helm_gpg_key_state
+
+    - name: Download the helm gpg key
+      get_url:
+        url: https://baltocdn.com/helm/signing.asc
+        dest: "{{ helm_temp_gpg }}"
+      when: not helm_gpg_key_state.stat.exists
+
+    - name: Decrypt the key and install it
+      shell: "cat {{ helm_temp_gpg }} | gpg --dearmor -o {{ helm_gpg }}"
+      when: not helm_gpg_key_state.stat.exists
+
+    - name: Delete tmp file after successful copy
+      file:
+        path: "{{ helm_temp_gpg }}"
+        state: absent
+      when: helm_gpg_key_state.stat.exists
+
+    - name: Set correct permissions on the helm keyring
+      file:
+        path: "{{ helm_gpg }}"
+        mode: a+r
+
+    - name: Configure the helm repository in the apt sources
+      lineinfile:
+        path: /etc/apt/sources.list.d/helm-stable-debian.list
+        line: "deb [arch=amd64 signed-by={{ helm_gpg }}] https://baltocdn.com/helm/stable/debian/   all main"
+        state: present
+        create: true
+        mode: 0644
+
+    - name: Update the apt cache and install Helm
+      apt:
+        update_cache: true
+        name:
+          - helm
+        state: present
+
+    - name: Add helm bash completion to the .bashrc file
+      lineinfile:
+        line: "source <(helm completion bash)"
+        path: /home/ubuntu/.bashrc

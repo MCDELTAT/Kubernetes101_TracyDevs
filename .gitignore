@@ -1,0 +1,6 @@
+/.facts
+.comments
+*.png
+*.gif
+*.jpeg
+.~lock*
